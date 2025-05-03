@@ -1,8 +1,9 @@
 /* 046267 Computer Architecture - HW #1                                 */
 /* This file should hold your implementation of the predictor simulator */
 
-#include "bp_api.h"
+#include <stdlib.h>
 #include <math.h>
+#include "bp_api.h"
 //#include <stdbool.h> // api 
 
 
@@ -22,7 +23,7 @@ uint32_t pc_to_btb_entry (uint32_t pc , unsigned len, unsigned shift);
 typedef struct Btb_entry{
 	uint32_t tag;
 	uint32_t target;
-	uint32_t localhistory;
+	uint32_t localHistory;
 	int *fsmLocal; //local fsm 
 }Btb_entry;
 
@@ -55,7 +56,7 @@ for(unsigned j=0; j< (1 << historySize); j++){
 	btbTable=(Btb_entry * ) malloc(btbSize * sizeof(Btb_entry));
 	if (!(btbTable)){
 		//cleanup
-		free
+		free(fsmGlobal);
 		return -1;//cheak malloc...
 	} 
 	for(unsigned i =0; i< btbSize ;i++){
@@ -75,7 +76,7 @@ for(unsigned j=0; j< (1 << historySize); j++){
 		}
 		btbTable[i].tag=0;
 		btbTable[i].target=0;
-		btbTable[i].localhistory=0;
+		btbTable[i].localHistory=0;
 	
 	}
 
@@ -88,19 +89,18 @@ for(unsigned j=0; j< (1 << historySize); j++){
     fsmState_p = fsmState;
     isGlobalHist_p = isGlobalHist;
 	isglobalTable_p  = isGlobalTable;
-	shared_p = shared;
+	shared_p = Shared;
 
 	return 0;
 }
 
 bool BP_predict(uint32_t pc, uint32_t *dst){
-	int btbEnt=pc_to_btb_entry(pc,btbSize_p,2);
-	int
-	unsigned fsmVal;
+	uint32_t btbEnt=pc_to_btb_entry(pc,btbSize_p,2);
+	int fsmVal;
 	if(!isGlobalHist_p){
 		if(!isglobalTable_p){
 			if(btbTable[btbEnt].tag == pc_to_btb_entry(pc,tagSize_p,2)){
-				fsmVal = btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localhistory];
+				fsmVal = btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localHistory];
 				if(fsmVal >= 2){
 					*dst=btbTable[btbEnt].target;
 					return true;
@@ -113,13 +113,13 @@ bool BP_predict(uint32_t pc, uint32_t *dst){
 				uint32_t fsmTableEntry;
 				switch(shared_p){
 					case(NOT_USING_SHARE):
-						fsmTableEntry=btbTable[btbEnt].local_history;
+						fsmTableEntry=btbTable[btbEnt].localHistory;
 						break;
 					case(USING_SHARE_LSB):
-						fsmTableEntry=(btbTable[btbEnt].local_history) ^ (pc_to_btb_entry(pc,historySize_p,2));
+						fsmTableEntry=(btbTable[btbEnt].localHistory) ^ (pc_to_btb_entry(pc,historySize_p,2));
 						break;
 					case(USING_SHARE_MID):
-						fsmTableEntry=(btbTable[btbEnt].local_history) ^ (pc_to_btb_entry(pc,historySize_p,16));
+						fsmTableEntry=(btbTable[btbEnt].localHistory) ^ (pc_to_btb_entry(pc,historySize_p,16));
 						break;
 
 				}
@@ -155,11 +155,41 @@ bool BP_predict(uint32_t pc, uint32_t *dst){
 		}
 
 	}
-	*dest = pc + 4; 
+	*dst = pc + 4; 
 	return false;
 }
 
 void BP_update(uint32_t pc, uint32_t targetPc, bool taken, uint32_t pred_dst){
+	uint32_t btbEnt = pc_to_btb_entry(pc,btbSize_p,2);
+    uint32_t curPcTag = pc_to_btb_entry(pc,tagSize_p,2);
+    // Insert current tag if it is not in the BTB
+    if (btbTable[btbEnt].tag != curPcTag) {
+        btbTable[btbEnt].tag = curPcTag;
+        btbTable[btbEnt].target = targetPc;
+        btbTable[btbEnt].localHistory = 0;
+		for(unsigned i = 0; i < (1 << historySize_p); i++){
+            btbTable[btbEnt].fsmLocal[i] = fsmState_p;
+		}
+    }
+    // Current tag is already in BTB
+    else {
+        if (taken) {
+            // If branch taken, increment local fsm 
+            if (btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localHistory] != ST)
+                btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localHistory]++;
+            // Update local history value
+            btbTable[btbEnt].localHistory = ((btbTable[btbEnt].localHistory << 1) | 0x1); 
+            btbTable[btbEnt].target = targetPc;
+        }
+        else {
+            // else if branch not taken, decrement local fsm 
+            if (btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localHistory] != SNT)
+                btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localHistory]--;
+            // Update local history value
+            btbTable[btbEnt].localHistory = ((btbTable[btbEnt].localHistory << 1) & ~0x1);
+        }
+        
+    }
 	return;
 }
 
