@@ -1,206 +1,287 @@
 /* 046267 Computer Architecture - HW #1                                 */
 /* This file should hold your implementation of the predictor simulator */
-
-#include <stdlib.h>
-#include <math.h>
+/* C file */
+/* update 05/05/2025 - */
 #include "bp_api.h"
-//#include <stdbool.h> // api 
+#include <stdlib.h>
 
 
-// FSM states
-#define SNT 0
-#define WNT 1
-#define WT 2
-#define ST 3
+// share define
+#define NOT_USING_SHARE 0 // not using share
+#define USING_SHARE_LSB 1  // using lsb share 
+#define USING_SHARE_MID 2  // using  mid share
 
-#define NOT_USING_SHARE 0
-#define USING_SHARE_LSB 1
-#define USING_SHARE_MID 2
 
-uint32_t pc_to_btb_entry (uint32_t pc , unsigned len, unsigned shift);
+//HELP FUNCTION DECLERATION:
+uint32_t bit_slice (uint32_t field , unsigned len , unsigned shift);
 
-//single btb entry 
-typedef struct Btb_entry{
-	uint32_t tag;
+
+// FSM states -using enum
+enum FsmState {
+	SNT=0, // strongly not taken
+	WNT=1, // weakly not taken
+	WT=2, // weakly taken
+	ST=3 // strongly taken
+};
+
+// BTB entry  struct
+typedef struct BtbEntry{
+	uint32_t tag; 
 	uint32_t target;
 	uint32_t localHistory;
-	int *fsmLocal; //local fsm 
-}Btb_entry;
+	int *localFsm; // pointer to local fsm 
+	bool validBit;
+}BtbEntry;
+
+// BTB configuration :
+
+static unsigned bt_btbSize;
+static unsigned bt_historySize;
+static unsigned bt_tagSize;
+static unsigned bt_fsmState;
+static bool bt_isGlobalHist;
+static bool bt_isGlobalTable;
+static int bt_shared;
+static uint32_t bt_globalHistory;
+
+static int *bt_globalFsm=NULL;
+static BtbEntry *bt_btbTable= NULL;
+
+// statistics tracking
+
+static unsigned numberOfPredictions =0; // number of predictions
+static unsigned numberOfFlushes =0 ; // number of flushes
 
 
 
-unsigned btbSize_p;
-unsigned historySize_p;
-unsigned tagSize_p;
-unsigned fsmState_p;
-bool isGlobalHist_p;
-bool isglobalTable_p;
-int shared_p;
-
-int *fsmGlobal; //global fsm
-Btb_entry *btbTable; // btb table
-uint32_t globalHistory_p;
 
 
+/* initialization function :*/
 int BP_init(unsigned btbSize, unsigned historySize, unsigned tagSize, unsigned fsmState,
 			bool isGlobalHist, bool isGlobalTable, int Shared){
 
-	//fsm global init
-	fsmGlobal= (int*)malloc((1 << historySize)*sizeof(int));// int(pow(n,2))<--> 1 << btbSize
-if (!(fsmGlobal)){
-	return -1;//cheak malloc...
-} 
-for(unsigned j=0; j< (1 << historySize); j++){
-	fsmGlobal[j]=fsmState;
-}
-	btbTable=(Btb_entry * ) malloc(btbSize * sizeof(Btb_entry));
-	if (!(btbTable)){
-		//cleanup
-		free(fsmGlobal);
-		return -1;//cheak malloc...
-	} 
-	for(unsigned i =0; i< btbSize ;i++){
-		btbTable[i].fsmLocal= (int*)malloc((1 << historySize) *sizeof(int));// pow(n,2) <--> 1 << btbSize
-		if (!(btbTable[i].fsmLocal)){
-			
-			// Cleanup 
-			for (unsigned k = 0; k < i; k++) {
-				free(btbTable[k].fsmLocal);
-			}
-			free(btbTable);
-			return -1;
-		} 
+	/*----set btb configuration -----*/
+	bt_btbSize=btbSize;
+	bt_historySize = historySize;
+	bt_tagSize = tagSize;
+	bt_fsmState = fsmState;
+	bt_isGlobalHist = isGlobalHist;
+	bt_isGlobalTable = isGlobalTable;
+	bt_shared = Shared;
+	bt_globalHistory=0;
 
-		for(unsigned j=0; j< (1 << historySize); j++){
-			btbTable[i].fsmLocal[j]=fsmState;
-		}
-		btbTable[i].tag=0;
-		btbTable[i].target=0;
-		btbTable[i].localHistory=0;
 	
+	// allocate global fsm if needed :
+	if(bt_isGlobalTable){
+		bt_globalFsm = (int*)malloc(sizeof(int)*(1 << bt_historySize));
+		if(!bt_globalFsm){
+			return -1;
+		}
+		for(unsigned i =0; i<(1 << bt_historySize); i++){
+			bt_globalFsm[i]=bt_fsmState;
+		}
+	}
+	
+
+	//allocate btb table
+	bt_btbTable = (BtbEntry*)malloc(sizeof(BtbEntry)*btbSize);
+	if(!bt_btbTable){
+		if(bt_isGlobalTable){
+			free(bt_globalFsm);
+		}
+		return -1;
 	}
 
-	
-	//param init 
-	globalHistory_p=0;
-	btbSize_p=btbSize;
-	historySize_p = historySize;
-	tagSize_p = tagSize;
-    fsmState_p = fsmState;
-    isGlobalHist_p = isGlobalHist;
-	isglobalTable_p  = isGlobalTable;
-	shared_p = Shared;
+	for(unsigned i =0 ; i< bt_btbSize ;i++){
+		bt_btbTable[i].tag=0;
+		bt_btbTable[i].target=0;
+		bt_btbTable[i].localHistory=0;
+		bt_btbTable[i].validBit=false;
 
-	return 0;
-}
-
-bool BP_predict(uint32_t pc, uint32_t *dst){
-	uint32_t btbEnt=pc_to_btb_entry(pc,btbSize_p,2);
-	int fsmVal;
-	if(!isGlobalHist_p){
-		if(!isglobalTable_p){
-			if(btbTable[btbEnt].tag == pc_to_btb_entry(pc,tagSize_p,2)){
-				fsmVal = btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localHistory];
-				if(fsmVal >= 2){
-					*dst=btbTable[btbEnt].target;
-					return true;
+		// allocate local fsm if needed
+		if(!bt_isGlobalTable){
+			bt_btbTable[i].localFsm=(int*)malloc(sizeof(int)*(1 << bt_historySize));
+			if(!bt_btbTable[i].localFsm){
+				for(unsigned k =0 ; k< i ;k++){
+					free(bt_btbTable[k].localFsm);
 				}
-	
+				free(bt_btbTable);
+				return -1;
 			}
+
+			for(unsigned j =0 ; j<(1 << bt_historySize) ; j++){
+				bt_btbTable[i].localFsm[j]=bt_fsmState;
+			}
+
 		}
 		else{
-			if(btbTable[btbEnt].tag == pc_to_btb_entry(pc,tagSize_p,2)){
-				uint32_t fsmTableEntry;
-				switch(shared_p){
-					case(NOT_USING_SHARE):
-						fsmTableEntry=btbTable[btbEnt].localHistory;
-						break;
-					case(USING_SHARE_LSB):
-						fsmTableEntry=(btbTable[btbEnt].localHistory) ^ (pc_to_btb_entry(pc,historySize_p,2));
-						break;
-					case(USING_SHARE_MID):
-						fsmTableEntry=(btbTable[btbEnt].localHistory) ^ (pc_to_btb_entry(pc,historySize_p,16));
-						break;
-
-				}
-				fsmVal = fsmGlobal[fsmTableEntry];
-				if(fsmVal >= 2){
-					*dst=btbTable[btbEnt].target;
-					return true;
-				}
-			
-		
-			}
-
+			bt_btbTable[i].localFsm=NULL;
 		}
+	}
+
+	return 0; // success
+
+}
+
+
+/* prediction function */
+bool BP_predict(uint32_t pc, uint32_t *dst){
+
+	// calc index and tag
+	unsigned btbIndexBits = __builtin_ctz(bt_btbSize);
+	uint32_t index = bit_slice(pc, btbIndexBits, 2);
+	uint32_t tag = bit_slice(pc, bt_tagSize , 2 + btbIndexBits );
+	//update number of predictions
+	numberOfPredictions++;
+
+	//cheak 
+	if (!bt_btbTable[index].validBit || bt_btbTable[index].tag != tag) {
+		*dst = pc + 4;
+		return false;
+	}
+	
+	
+	//  get history global/local
+	uint32_t historySource = bt_isGlobalHist ? bt_globalHistory : bt_btbTable[index].localHistory;
+
+	//  apply share 
+	if(bt_isGlobalTable){
+		if(bt_shared == USING_SHARE_LSB){
+			historySource ^= bit_slice(pc , bt_historySize , 2);
+		}
+
+		if(bt_shared == USING_SHARE_MID){
+			historySource ^= bit_slice(pc , bt_historySize , 16);
+		}
+	}
+
+	// fsm index calc
+	 uint32_t fsmIndex = historySource & ((1 << bt_historySize) -1);
+	 // get current state
+	 int currentState = bt_isGlobalTable ? bt_globalFsm[fsmIndex] : bt_btbTable[index].localFsm[fsmIndex];
+
+	 bool taken = (currentState >= WT);
+	 *dst= taken ? bt_btbTable[index].target : pc+4;
+	 return taken; 
+}
+
+
+
+/* bp update function */
+void BP_update(uint32_t pc, uint32_t targetPc, bool taken, uint32_t pred_dst){
+	
+	// update statistics :
+	if((taken && targetPc != pred_dst) || (!taken && ((pc+4) != pred_dst))) {
+		numberOfFlushes++;
+	}
+	// calc index and tag
+	unsigned btbIndexBits = __builtin_ctz(bt_btbSize);
+	uint32_t index = bit_slice(pc, btbIndexBits, 2);
+	uint32_t tag = bit_slice(pc, bt_tagSize , 2 + btbIndexBits );
+
+	//updatee entry if neeeded
+	if(!bt_btbTable[index].validBit || bt_btbTable[index].tag != tag){
+		bt_btbTable[index].tag=tag;
+		bt_btbTable[index].localHistory=0;
+		bt_btbTable[index].target= targetPc;
+		bt_btbTable[index].validBit = true;
+		if(!bt_isGlobalTable){
+			for(unsigned j =0 ; j<(1 << bt_historySize) ; j++){
+				bt_btbTable[index].localFsm[j]=bt_fsmState;
+			}
+		}
+
+	}
+
+	// get history global/local
+	uint32_t historySource = bt_isGlobalHist ? bt_globalHistory : bt_btbTable[index].localHistory;
+
+	//  apply share 
+	if(bt_isGlobalTable){
+		if(bt_shared == USING_SHARE_LSB){
+			historySource ^= bit_slice(pc , bt_historySize , 2);
+		}
+
+		if(bt_shared == USING_SHARE_MID){
+			historySource ^= bit_slice(pc , bt_historySize , 16);
+		}
+	}
+
+	// fsm index calc
+	uint32_t fsmIndex = historySource & ((1 << bt_historySize) -1);
+
+	// update fsm (global or local ) and update history (global or local)
+	if(bt_isGlobalTable){
+		if(taken && bt_globalFsm[fsmIndex] < ST){
+			bt_globalFsm[fsmIndex]++;
+		}
+		else if(!taken && bt_globalFsm[fsmIndex] > SNT){
+			bt_globalFsm[fsmIndex]--;
+		}
+	} else {
+		if(taken && bt_btbTable[index].localFsm[fsmIndex] < ST){
+			bt_btbTable[index].localFsm[fsmIndex]++;
+		}
+		else if(!taken && bt_btbTable[index].localFsm[fsmIndex] > SNT){
+			bt_btbTable[index].localFsm[fsmIndex]--;
+		}
+	}
+
+	if(bt_isGlobalHist){
+		bt_globalHistory = ((bt_globalHistory << 1) | taken ) & ((1 << bt_historySize) -1);
 	}
 	else{
-		uint32_t fsmTableEntry;
-				switch(shared_p){
-					case(NOT_USING_SHARE):
-						fsmTableEntry=globalHistory_p;
-						break;
-					case(USING_SHARE_LSB):
-						fsmTableEntry=(globalHistory_p) ^ (pc_to_btb_entry(pc,historySize_p,2));
-						break;
-					case(USING_SHARE_MID):
-						fsmTableEntry=(globalHistory_p) ^ (pc_to_btb_entry(pc,historySize_p,16));
-						break;
+		bt_btbTable[index].localHistory = ((bt_btbTable[index].localHistory << 1) | taken ) & ((1 << bt_historySize) -1);
+	}
+	//update target
+	bt_btbTable[index].target = targetPc;
 
-				}
-		fsmVal=fsmGlobal[fsmTableEntry];
-		if(fsmVal >= 2){
-			*dst=btbTable[btbEnt].target;
-			return true;
+	return;
+}
+ // clean up and return statistics
+void BP_GetStats(SIM_stats *curStats){
+
+	curStats->flush_num =numberOfFlushes;
+	curStats->br_num = numberOfPredictions;
+
+	//memory usage calc - in theory
+	unsigned memorySize = 0;
+	if(bt_isGlobalHist){
+		memorySize +=bt_historySize;
+	}
+	else{
+		memorySize += bt_historySize *bt_btbSize;
+	}
+
+	if(bt_isGlobalTable){
+		memorySize += 2* (1 << bt_historySize);
+	}
+	else{
+		memorySize += bt_btbSize * 2 * (1 << bt_historySize);
+	}
+	memorySize += bt_btbSize * (bt_tagSize+30+ 1);
+	curStats->size = memorySize;
+
+
+	//cleanUp :) - free all allocated memory
+
+	if(bt_isGlobalTable){
+		free(bt_globalFsm);
+	}
+	else{
+		for(unsigned i =0 ; i< bt_btbSize ;i++){
+			free(bt_btbTable[i].localFsm);
 		}
 
 	}
-	*dst = pc + 4; 
-	return false;
-}
-
-void BP_update(uint32_t pc, uint32_t targetPc, bool taken, uint32_t pred_dst){
-	uint32_t btbEnt = pc_to_btb_entry(pc,btbSize_p,2);
-    uint32_t curPcTag = pc_to_btb_entry(pc,tagSize_p,2);
-    // Insert current tag if it is not in the BTB
-    if (btbTable[btbEnt].tag != curPcTag) {
-        btbTable[btbEnt].tag = curPcTag;
-        btbTable[btbEnt].target = targetPc;
-        btbTable[btbEnt].localHistory = 0;
-		for(unsigned i = 0; i < (1 << historySize_p); i++){
-            btbTable[btbEnt].fsmLocal[i] = fsmState_p;
-		}
-    }
-    // Current tag is already in BTB
-    else {
-        if (taken) {
-            // If branch taken, increment local fsm 
-            if (btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localHistory] != ST)
-                btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localHistory]++;
-            // Update local history value
-            btbTable[btbEnt].localHistory = ((btbTable[btbEnt].localHistory << 1) | 0x1); 
-            btbTable[btbEnt].target = targetPc;
-        }
-        else {
-            // else if branch not taken, decrement local fsm 
-            if (btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localHistory] != SNT)
-                btbTable[btbEnt].fsmLocal[btbTable[btbEnt].localHistory]--;
-            // Update local history value
-            btbTable[btbEnt].localHistory = ((btbTable[btbEnt].localHistory << 1) & ~0x1);
-        }
-        
-    }
+	free(bt_btbTable);
 	return;
 }
 
-void BP_GetStats(SIM_stats *curStats){
-	return;
-}
-/////////////////////////
-uint32_t pc_to_btb_entry (uint32_t pc , unsigned len, unsigned shift){
-	uint32_t mask = (1<<(int)log2(len))-1;
-	uint32_t btbEntry= (pc >> shift ) ;
-	btbEntry &= mask;
-	return btbEntry;
+/* bit_slicing help function */
+uint32_t bit_slice (uint32_t field , unsigned len , unsigned shift){
+
+	uint32_t  mask = (len == 32) ? 0xFFFFFFFF : ((1 << len) - 1); //mask
+	return (field >> shift) & mask ;
 }
 
