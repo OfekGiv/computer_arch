@@ -33,7 +33,7 @@ typedef struct BtbEntry{
 	bool validBit;
 }BtbEntry;
 
-// BTB configuration :
+// BTB global configuration :
 
 static unsigned bt_btbSize;
 static unsigned bt_historySize;
@@ -134,7 +134,7 @@ bool BP_predict(uint32_t pc, uint32_t *dst){
 	//update number of predictions
 	numberOfPredictions++;
 
-	//cheak 
+	//check 
 	if (!bt_btbTable[index].validBit || bt_btbTable[index].tag != tag) {
 		*dst = pc + 4;
 		return false;
@@ -179,7 +179,7 @@ void BP_update(uint32_t pc, uint32_t targetPc, bool taken, uint32_t pred_dst){
 	uint32_t index = bit_slice(pc, btbIndexBits, 2);
 	uint32_t tag = bit_slice(pc, bt_tagSize , 2 + btbIndexBits );
 
-	//updatee entry if neeeded
+	//update entry if neeeded
 	if(!bt_btbTable[index].validBit || bt_btbTable[index].tag != tag){
 		bt_btbTable[index].tag=tag;
 		bt_btbTable[index].localHistory=0;
