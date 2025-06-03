@@ -1,6 +1,6 @@
 
 cacheSim: cacheSim.cpp
-	g++ -o cacheSim cacheSim.cpp
+	g++ -std=c++11 -o cacheSim cacheSim.cpp
 
 .PHONY: clean
 clean:
