@@ -1,10 +1,14 @@
+// last update 5/6/2025 - 20:00
+//course - Computer Architecture 046267
+//hw-2 cache simulator :(
+// id : 213306194 , id: 205663776
+/*------------------------------------------------*/
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <vector>
 #include <cmath>
-
 using std::FILE;
 using std::string;
 using std::cout;
@@ -12,307 +16,285 @@ using std::endl;
 using std::cerr;
 using std::ifstream;
 using std::stringstream;
-using std::vector;
-
+using namespace std;
+#define ADDRESS_SIZE 32 //address is 32 bit long
+/*--------------------------------------------------------------------------------------------------------*/
+ //define struct cache block
 struct cacheBlock {
-    unsigned int tag;
-    bool valid = 0;
-    bool dirty = 0;
-    unsigned int evictCount = 0;
+    unsigned tag = 0; // tag
+    bool valid = 0; // valid bit
+    bool dirty = 0; // dirty bit 
+    unsigned evictCount = 0; // evicted counter lru
 };
 
+// class cache level 
 class Cache {
-public:
-    Cache(unsigned cacheSize, unsigned blockSize, unsigned assoc, unsigned accessTime)
-        :blockSize(blockSize), assoc(assoc), accessTime(accessTime) {
-            sets = cacheSize / (blockSize * assoc);    
-            blocks.resize(sets,vector<cacheBlock>(assoc));
-            blockOffsetBits = log2(blockSize);
-            setIndexBits = log2(sets); 
-        }
-
-    // Check cache hit
-    // return true for hit, false for miss
-    bool checkHit(unsigned address) {
-
-        unsigned setIndex = (address >> blockOffsetBits) & ((1 << setIndexBits)-1);
-        unsigned tag = address >> (blockOffsetBits + setIndexBits);
-
-        for (auto& block : blocks[setIndex]){
-            if (block.valid && block.tag == tag) {
-                return true; // hit
-            }
-        }
-        return false; // miss
-    }
-    
-    // Update LRU if tags are matching
-    // return 0 on success, return -1 when no matching tag was found
-    int updateLRU(unsigned address) {
-
-        unsigned setIndex = (address >> blockOffsetBits) & ((1 << setIndexBits)-1);
-        unsigned tag = address >> (blockOffsetBits + setIndexBits);
-
-        for (auto& block : blocks[setIndex]){
-            if (block.valid && block.tag == tag) {
-                unsigned int x = block.evictCount;
-                block.evictCount = assoc - 1;
-                for (auto& way : blocks[setIndex]){
-                    if(block.tag != way.tag && (way.evictCount > x))
-                        way.evictCount--;
-                }
-                return 0;
-            }
-        }
-        return -1;
-    }
-
-
-    // Update dirty bit if tags are matching
-    // return 0 on success, return -1 when no matching tag was found
-    int updateDirtyBit(unsigned address) {
-
-        unsigned setIndex = (address >> blockOffsetBits) & ((1 << setIndexBits)-1);
-        unsigned tag = address >> (blockOffsetBits + setIndexBits);
-        
-        for (auto& block : blocks[setIndex]){
-            if (block.valid && block.tag == tag) {
-                block.dirty = 1;
-                return 0; 
-            }
-        }
-        return -1; 
-    }
-
-    // Evict blocks from cache and replace with new block
-    // return 0 for clean eviction, return 1 for dirty eviction with dirty evicted address passed by reference
-    int evictBlock(unsigned address, unsigned& evictedAddress) {
-
-        unsigned isDirty = 0;
-        unsigned setIndex = (address >> blockOffsetBits) & ((1 << setIndexBits)-1);
-        unsigned tag = address >> (blockOffsetBits + setIndexBits);
-
-        for (auto& block : blocks[setIndex]){
-            // evict least recently used way with evictCount = 0
-            if (block.evictCount == 0){
-
-                // Check for dirty eviction
-                if (block.dirty == 1){
-                    isDirty = 1;
-                }
-                evictedAddress = (block.tag << (blockOffsetBits + setIndexBits)) | (setIndex << blockOffsetBits);
-
-                block.tag = tag;
-                // LRU update algorithm
-                unsigned int x = block.evictCount;
-                block.evictCount = assoc - 1;
-                for (auto& way : blocks[setIndex]){
-                    if(block.tag != way.tag && (way.evictCount > x)){
-                            way.evictCount--;
-                    }
-                return isDirty; // clean eviction 
-                }
-            }
-        }
-    }
-
-    // Check if set is full
-    // return true if full, false if not full
-    bool checkSetFull(unsigned address) {
-        
-        unsigned setIndex = (address >> blockOffsetBits) & ((1 << setIndexBits)-1);
-
-        for (auto& block : blocks[setIndex]){
-            if (!block.valid) {
-                return false; // Set in not full
-            }
-        }
-        return true; // Set is full
-    }
-    
-    // Insert a new block to an empty cache line, update valid bit and update LRU
-    // return 0 on success, return -1 if no empty line was found
-    int updateValidBit(unsigned address) {
-
-        unsigned setIndex = (address >> blockOffsetBits) & ((1 << setIndexBits)-1);
-        unsigned tag = address >> (blockOffsetBits + setIndexBits);
-        
-        for (auto& block : blocks[setIndex]){
-            if (!block.valid) {
-                block.tag = tag;
-                block.valid = 1;
-                unsigned int x = block.evictCount;
-                block.evictCount = assoc - 1;
-                for (auto& way : blocks[setIndex]){
-                    if(block.tag != way.tag && (way.evictCount > x))
-                        way.evictCount--;
-                }
-                return 0; 
-            }
-        }
-        return -1; 
-    }
-
-    unsigned getAccessTime() const { return accessTime;}
-
 private:
-    unsigned blockSize, assoc, sets;
-    unsigned blockOffsetBits;
-    unsigned setIndexBits; 
-    unsigned accessTime;
-    vector<vector<cacheBlock> > blocks;
-};
-
-
-class cacheSystem {
+    unsigned cacheSize; // size
+    unsigned blockSize, assoc; // block size ans assoc
+    unsigned accessTime; // access time 
+    unsigned num_of_sets; //number of sets
+    unsigned num_of_ways; //number of ways
+    unsigned set_size; // set size in bits
+    unsigned offset_size; //offset size in bits
+    unsigned tag_size; // tag size in bits
+    vector<vector<cacheBlock>> blocks; // vector of vector of blocks
 
 public:
-    cacheSystem(unsigned memCycle, unsigned blockSize, unsigned L1Size, unsigned L2Size, unsigned L1Assoc, unsigned L2Assoc,
+// consrtuctor
+    Cache(unsigned cacheSize, unsigned blockSize, unsigned assoc, unsigned accessTime)
+        : cacheSize(cacheSize), blockSize(blockSize), assoc(assoc), accessTime(accessTime) {
+        set_size = cacheSize - blockSize - assoc; // calc of set size - can be shown log2 of num of sets
+        num_of_sets = 1 << set_size; // pow2
+        num_of_ways = 1 << assoc; // pow2
+        offset_size = blockSize; // in bits- log2(bytes)
+        tag_size = ADDRESS_SIZE - offset_size - set_size; // calc    
+        blocks.resize(num_of_sets, vector<cacheBlock>(num_of_ways)); //resize vector of vectors
+    }
+
+    // Check for hit
+    bool checkHit(unsigned address, unsigned& way_index) {
+        unsigned index = (address >> offset_size) & ((1 << set_size) - 1); // calc index
+        unsigned tag = address >> (offset_size + set_size); // calc tag
+         // look for hit    
+        for (unsigned i = 0; i < num_of_ways; i++) {
+            if (blocks[index][i].valid && blocks[index][i].tag == tag) {
+                way_index = i;
+                return true;
+            }
+        }
+        return false;
+    }
+    // Find invalid way- empty block
+    bool findInvalidWay(unsigned index, unsigned& way_index) {
+        for (unsigned i = 0; i < num_of_ways; i++) {
+            if (!blocks[index][i].valid) {
+                way_index = i;
+                return true;
+            }
+        }
+        return false;
+    }
+    // find oldest - by lru alg
+    void findByEvictedCount(unsigned index, unsigned& way_index) {
+        for (unsigned i = 0; i < num_of_ways; i++) {
+            if (blocks[index][i].evictCount == 0) {
+                way_index = i;
+                break;
+            }
+        }
+        return;
+    }
+
+    // Update evicted counter
+    void updateLRU(unsigned index, unsigned way_index) {
+        unsigned x = blocks[index][way_index].evictCount;
+        blocks[index][way_index].evictCount = num_of_ways - 1; 
+        for (unsigned j = 0; j < num_of_ways; j++) {
+            if (j != way_index && blocks[index][j].evictCount > x) {
+                blocks[index][j].evictCount--;
+            }
+        }
+        return;
+    }
+
+    // Insert block into cache
+    void insertBlock(unsigned address, unsigned way, bool isDirty) {
+        unsigned index = (address >> offset_size) & ((1 << set_size) - 1);
+        unsigned tag = address >> (offset_size + set_size);
+        blocks[index][way].valid = true;
+        blocks[index][way].tag = tag;
+        blocks[index][way].dirty = isDirty;
+    }
+
+    // Invalidate block
+    bool invalidate(unsigned address) {
+        unsigned index = (address >> offset_size) & ((1 << set_size) - 1);
+        unsigned tag = address >> (offset_size + set_size);
+        
+        for (unsigned i = 0; i < num_of_ways; i++) {
+            if (blocks[index][i].valid && blocks[index][i].tag == tag) {
+                bool wasDirty = blocks[index][i].dirty;
+                blocks[index][i].valid = false;
+                blocks[index][i].dirty = false;
+                return wasDirty;
+            }
+        }
+        return false;
+    }
+
+    // Get block address?
+    unsigned getBlockAddress(unsigned index, unsigned way_index) {
+        return (blocks[index][way_index].tag << (set_size + offset_size)) | (index << offset_size);
+    }
+
+    // Check dirty
+    bool isDirty(unsigned index, unsigned way_index) {
+        return blocks[index][way_index].dirty;
+    }
+
+    // Set dirty 
+    void setDirty(unsigned index, unsigned way_index) {
+        blocks[index][way_index].dirty = true;
+    }
+    // get access time 
+    unsigned getAccessTime() const { 
+        return accessTime; 
+    }
+    // get index of address
+    unsigned getIndex(unsigned address) {
+        return (address >> offset_size) & ((1 << set_size) - 1);
+    }
+
+    // Check if block is valid
+    bool isValid(unsigned index, unsigned way_index) {
+        return blocks[index][way_index].valid;
+    }
+};
+// calss cachesystem
+class CacheSystem {
+private:
+    unsigned memCycle;
+    unsigned wrAlloc;
+    Cache L1, L2;
+    double totalTime;
+    double missesL1;
+    double missesL2;
+    double accessesL1;
+    double accessesL2;
+
+public:
+    CacheSystem(unsigned memCycle, unsigned blockSize, unsigned L1Size, unsigned L2Size, unsigned L1Assoc, unsigned L2Assoc,
                 unsigned L1Cycles, unsigned L2Cycles, unsigned wrAlloc)
-        : memCycle(memCycle), wrAlloc(wrAlloc),
+        : memCycle(memCycle),
+          wrAlloc(wrAlloc),
           L1(L1Size, blockSize, L1Assoc, L1Cycles),
           L2(L2Size, blockSize, L2Assoc, L2Cycles),
-          blockSize(blockSize) {}
-    
-    void access(unsigned address, char operation){
-
-        unsigned evictedAddress;
-
-        // Access L1
-        AccessL1++;
-        totalCycles += L1.getAccessTime();
-
-        // L1 hit
-        if (L1.checkHit(address)) {
-            // Update L1 LRU
-            if (!L1.updateLRU(address)) {
-                cout << __LINE__ << ": Could not update L1 LRU" << endl;
-                return;
-            }
-
+          totalTime(0),
+          missesL1(0), 
+          missesL2(0), 
+          accessesL1(0), 
+          accessesL2(0) {}
+    // access to memory hir
+    void access(unsigned address, char operation) {
+        accessesL1++;//update l1 
+        totalTime += L1.getAccessTime();//update total time
+        unsigned updateLru2 =false; 
+        bool snoop =false;
+        unsigned evictedAddr;
+        unsigned evictedAddr2; 
+        bool  bylru=false;
+        unsigned way1_index = 0;
+        //check for hit 
+        bool hit1 = L1.checkHit(address, way1_index);
+        if (hit1) {
             if (operation == 'w') {
-                //Update L1 dirty bit
-                if (!L1.updateDirtyBit(address)) {
-                    cout << __LINE__ << ": Could not update dirty bit" << endl;
-                    return;
-                }
+                L1.setDirty(L1.getIndex(address), way1_index);
             }
-
+            L1.updateLRU(L1.getIndex(address), way1_index);
             return;
         }
-        // L1 miss
-        missesL1++;
-        // L2 access
-        AccessL2++;
-        totalCycles += L2.getAccessTime();
+        /////// miss l1/////
+        missesL1++;// mis l1 
+        accessesL2++;
+        totalTime += L2.getAccessTime();
 
-        if (L2.checkHit(address)) {
-            // Update L2 LRU
-            if (!L2.updateLRU(address)) {
-                cout << __LINE__ << ": Could not update L2 LRU" << endl;
-                return;
+        unsigned way2_index = 0;
+        //check hit l2
+        bool hit2 = L2.checkHit(address, way2_index);
+        //mis
+        if (!hit2) {
+            // L2 Miss
+            missesL2++;
+            totalTime += memCycle;
+            
+            if (wrAlloc == 1 || operation == 'r') {
+                // Allocate in L2
+                unsigned indexL2 = L2.getIndex(address);
+                unsigned way_index=0;
+                bool l2AllocWay = L2.findInvalidWay(indexL2, way_index); // find invalid
+                
+                if (!l2AllocWay) {
+                    // L2 full
+                    L2.findByEvictedCount(indexL2, way_index); // find evicted- lru
+                }
+                if (L2.isValid(indexL2, way_index)) {
+                        //  invalidate from L1
+                    unsigned evictedAddr = L2.getBlockAddress(indexL2, way_index);
+                    bool wasDirty = L1.invalidate(evictedAddr);
+                        
+                    if (wasDirty) {
+                        // Update L2 LRU for dirty eviction
+                        //updateL2LRU(evictedAddr);
+                        snoop=true; // fir snoop
+                    }
+                }
+                
+                L2.insertBlock(address, way_index, false); // update l2 block
+                way2_index = way_index;
+                updateLru2=true;
+            }
+        }
+
+        if (wrAlloc == 1 || operation == 'r') {
+            // Allocate in L1
+            unsigned indexL1 = L1.getIndex(address);
+            unsigned way_index1=0;
+            bool l1AllocWay = L1.findInvalidWay(indexL1, way_index1);
+            
+            if (!l1AllocWay) {
+                // L1 full, evict LRU
+                L1.findByEvictedCount(indexL1, way_index1);
+                
+                if (L1.isValid(indexL1, way_index1) && L1.isDirty(indexL1, way_index1)) {
+                    // Dirty eviction from L1 - update L2
+                    evictedAddr2 = L1.getBlockAddress(indexL1, way_index1);
+                    //updateL2LRU(evictedAddr2);
+                    bylru=true;
+                }
             }
             
-            if ((operation == 'w' && wrAlloc == 1)) {
-                if (wrAlloc) {
-                    // Update L2 dirty bit
-                    if (!L2.updateDirtyBit(address)) {
-                        cout << __LINE__ << ": Could not update dirty bit" << endl;
-                        return;
-                    }
-                }
-                // Update L1 dirty bit
-                if (L1.evictBlock(address,evictedAddress)) {
-                    if (!L1.updateDirtyBit(address)) {
-                        cout << __LINE__ << ": Could not update dirty bit" << endl;
-                        return;
-                    }
-                }
-            }
-            else if (operation == 'r') {
-                // Update L1 dirty bit
-                if (L1.evictBlock(address,evictedAddress)) {
-                    if (!L1.updateDirtyBit(address)) {
-                        cout << __LINE__ << ": Could not update dirty bit" << endl;
-                        return;
-                    }
-                }
-
-            }
-            return;
+            bool isDirty = (operation == 'w');
+            L1.insertBlock(address, way_index1, isDirty); //update l1 block
+            L1.updateLRU(indexL1, way_index1); // update lru of 1
         }
-
-        // L2 miss
-        missesL2++;
-        // Memory access
-        totalCycles += memCycle;
-
-        if (operation == 'w') {
-            if (wrAlloc == 1) {
-                // L1 miss and L2 miss, write access with write allocate
-                // Evict L2 line 
-                L2.evictBlock(address, evictedAddress);
-                // Evict L1 line
-                if (L1.evictBlock(address, evictedAddress)) {
-                    // Update dirty evicted line in L2
-                    L2.updateLRU(evictedAddress);
-                }
-
-            }
+        
+        // Update L2 LRU if we accessed it
+        if (updateLru2 || hit2) {
+            L2.updateLRU(L2.getIndex(address), way2_index);
         }
-        else {
-            if (L2.checkSetFull(address)) {
-                L2.evictBlock(address,evictedAddress);
-            }
-            else {
-                if (!L2.updateValidBit(address)){
-                    cout << __LINE__ << ": No empty cache line was found in L2" << endl;
-                    return;
-                }
-            }
-
-
-            if (L1.checkSetFull(address)) {
-                if (L1.evictBlock(address, evictedAddress)) {
-                    // Update dirty evicted line in L2
-                    L2.updateLRU(evictedAddress);
-                }
-            }
-            else {
-                if (!L1.updateValidBit(address)){
-                    cout << __LINE__ << ": No empty cache line was found in L1" << endl;
-                    return;
-                }
-            }
+        if(snoop){
+            updateL2LRU(evictedAddr); // snoop
+        }
+        if(bylru){
+             updateL2LRU(evictedAddr2);// dirty update 
+        }
+        
+    }
+// update lru 2 by snoop or dirty 
+    void updateL2LRU(unsigned address) {
+        // Snoop operation - zero time cost
+        unsigned way;
+        bool l2Way_hit = L2.checkHit(address, way);
+        if (l2Way_hit) {
+            L2.updateLRU(L2.getIndex(address), way);
         }
     }
-
-
-    double getTotalCycles() const { return totalCycles;}
-    double getL1MissRate() const { return missesL1/AccessL1;}
-    double getL2MissRate() const { return missesL2/AccessL2;}
-
-private:
-    unsigned memCycle, wrAlloc;
-    unsigned blockSize;
-    Cache L1,L2;
-    unsigned totalCycles = 0;
-    unsigned AccessL1 = 0;
-    unsigned AccessL2 = 0;
-    unsigned missesL1 = 0;
-    unsigned missesL2 = 0;
-
+    //print statistics
+    void print_statistics() const {
+        printf("L1miss=%.03f ", (float)missesL1 / accessesL1);
+        printf("L2miss=%.03f ", (float)missesL2 / accessesL2);
+        printf("AccTimeAvg=%.03f\n", (float)totalTime / accessesL1);
+    }
 };
-
+/*-------------------------------------------------------------------------------------------------------*/
 int main(int argc, char **argv) {
 
 	if (argc < 19) {
 		cerr << "Not enough arguments" << endl;
 		return 0;
 	}
-
 	// Get input arguments
-
 	// File
 	// Assuming it is the first argument
 	char* fileString = argv[1];
@@ -323,10 +305,8 @@ int main(int argc, char **argv) {
 		cerr << "File not found" << endl;
 		return 0;
 	}
-
 	unsigned MemCyc = 0, BSize = 0, L1Size = 0, L2Size = 0, L1Assoc = 0,
 			L2Assoc = 0, L1Cyc = 0, L2Cyc = 0, WrAlloc = 0;
-
 	for (int i = 2; i < 19; i += 2) {
 		string s(argv[i]);
 		if (s == "--mem-cyc") {
@@ -352,9 +332,9 @@ int main(int argc, char **argv) {
 			return 0;
 		}
 	}
-
+	CacheSystem cacheSystem(MemCyc, BSize, L1Size, L2Size, L1Assoc, L2Assoc,
+                L1Cyc, L2Cyc, WrAlloc);
 	while (getline(file, line)) {
-
 		stringstream ss(line);
 		string address;
 		char operation = 0; // read (R) or write (W)
@@ -363,32 +343,24 @@ int main(int argc, char **argv) {
 			cout << "Command Format error" << endl;
 			return 0;
 		}
-
 		// DEBUG - remove this line
-		cout << "operation: " << operation;
-
+		//cout << "operation: " << operation;
 		string cutAddress = address.substr(2); // Removing the "0x" part of the address
-
 		// DEBUG - remove this line
-		cout << ", address (hex)" << cutAddress;
-
+		//cout << ", address (hex)" << cutAddress;
 		unsigned long int num = 0;
 		num = strtoul(cutAddress.c_str(), NULL, 16);
-
 		// DEBUG - remove this line
-		cout << " (dec) " << num << endl;
-
+		//cout << " (dec) " << num << endl;
+		cacheSystem.access(num, operation);
 	}
-
-    cacheSystem cache(MemCyc,BSize,L1Size,L2Size,L1Assoc,L2Assoc,L1Cyc,L2Cyc,WrAlloc); 
-
-	double L1MissRate = cache.getL1MissRate();
-	double L2MissRate = cache.getL2MissRate();
-	double avgAccTime = cache.getTotalCycles();
-
-	printf("L1miss=%.03f ", L1MissRate);
-	printf("L2miss=%.03f ", L2MissRate);
-	printf("AccTimeAvg=%.03f\n", avgAccTime);
-
+	//double L1MissRate;
+	//double L2MissRate;
+	//double avgAccTime;
+	//printf("L1miss=%.03f ", L1MissRate);
+	//printf("L2miss=%.03f ", L2MissRate);
+	//printf("AccTimeAvg=%.03f\n", avgAccTime);
+	cacheSystem.print_statistics();
 	return 0;
 }
+/*--------------------------------------------------------------------------------------------------------------------------------*/
